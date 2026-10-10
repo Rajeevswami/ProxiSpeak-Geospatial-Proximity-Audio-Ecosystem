@@ -2,21 +2,43 @@
  * Express surface: health, room catalogue, live stats and the Spatial Audit
  * endpoint used by the mid-project review.
  */
+import fs from 'node:fs';
+import path from 'node:path';
 import express from 'express';
 import cors from 'cors';
-import config from './config/index.js';
+import config, { SERVER_ROOT } from './config/index.js';
 import logger from './utils/logger.js';
 import { requireString, requireFiniteNumber, clamp } from './utils/validate.js';
 import { ValidationError, NotFoundError } from './utils/errors.js';
 import { requireRoom } from './services/roomService.js';
+import { corsOrigin } from './utils/origin.js';
 
 export function createApp({ services, redisBus, io, config: cfg = config, logger: log = logger }) {
   const app = express();
   app.disable('x-powered-by');
-  app.use(cors({ origin: cfg.server.clientOrigins.includes('*') ? true : cfg.server.clientOrigins }));
+  // Render terminates TLS at its proxy and forwards X-Forwarded-Proto; trusting
+  // one hop keeps req.ip / protocol and rate-limit-style checks truthful.
+  app.set('trust proxy', 1);
+  app.use(cors({ origin: corsOrigin(cfg) }));
   app.use(express.json({ limit: '64kb' }));
 
   const startedAt = Date.now();
+
+  /**
+   * Liveness endpoint used by the Render health check. Deliberately free of
+   * MongoDB/Redis calls so a blip in a backing service never marks a healthy
+   * process as dead (and never causes the platform to restart it).
+   */
+  app.get('/health', (req, res) => {
+    res.status(200).json({
+      status: 'ok',
+      service: 'proxispeak',
+      instanceId: cfg.server.instanceId,
+      uptimeSeconds: Math.round((Date.now() - startedAt) / 1000),
+      scaleMode: redisBus?.mode ?? 'single',
+      time: new Date().toISOString(),
+    });
+  });
 
   app.get('/api/health', async (req, res) => {
     const indexed = await services.geospatial.hasGeoIndex().catch(() => false);
@@ -143,6 +165,49 @@ export function createApp({ services, redisBus, io, config: cfg = config, logger
     }
   });
 
+  // ---------------------------------------------------------------------
+  // Static client bundle (single Web Service: one process, one port).
+  // Registered AFTER the API routes so /api/* can never be swallowed, and the
+  // SPA fallback only answers GET/HEAD for client-side routes. Socket.io
+  // requests (/socket.io/*) never reach Express — the Socket.io server
+  // intercepts them on the same HTTP server.
+  // ---------------------------------------------------------------------
+  const clientDist = resolveClientDist(cfg);
+  const hasClientBundle = fs.existsSync(path.join(clientDist, 'index.html'));
+
+  if (hasClientBundle) {
+    app.use(
+      express.static(clientDist, {
+        index: false,
+        maxAge: cfg.isProduction ? '1h' : 0,
+        setHeaders(res, filePath) {
+          // Never cache the entry document itself, or a deploy leaves clients
+          // pointing at hashed assets that no longer exist.
+          if (filePath.endsWith('index.html')) res.setHeader('Cache-Control', 'no-cache');
+        },
+      }),
+    );
+
+    // The entry document is read once at boot: it never changes while the
+    // process is alive (a deploy restarts us), and caching it removes a disk
+    // read from every client-side route.
+    const indexHtml = fs.readFileSync(path.join(clientDist, 'index.html'), 'utf8');
+
+    app.use((req, res, next) => {
+      if (req.method !== 'GET' && req.method !== 'HEAD') return next();
+      if (req.path.startsWith('/api') || req.path === '/health') return next();
+      // A deploy replaces the bundle; never let a browser pin an old one.
+      res.set('Cache-Control', 'no-cache');
+      return res.status(200).type('html').send(indexHtml);
+    });
+    log.info(`serving client bundle from ${clientDist}`);
+  } else {
+    log.warn(
+      `client bundle not found at ${clientDist} — serving API only. ` +
+        'Run `npm run build` at the repo root (Render build command) to produce it.',
+    );
+  }
+
   app.use((req, res) => {
     res.status(404).json({ ok: false, error: `No route for ${req.method} ${req.path}` });
   });
@@ -160,6 +225,15 @@ export function createApp({ services, redisBus, io, config: cfg = config, logger
 /** Hide credentials in anything we print or return over HTTP. */
 function redact(uri) {
   return uri.replace(/\/\/([^:]+):([^@]+)@/, '//$1:***@');
+}
+
+/**
+ * Where the built client lives. Defaults to <repo>/client/dist and can be
+ * overridden with CLIENT_DIST if the bundle is built somewhere else.
+ */
+function resolveClientDist(cfg) {
+  if (cfg.server.clientDist) return path.resolve(cfg.server.clientDist);
+  return path.resolve(SERVER_ROOT, '..', 'client', 'dist');
 }
 
 export default createApp;

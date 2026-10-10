@@ -6,7 +6,7 @@ import http from 'node:http';
 import process from 'node:process';
 import config from './config/index.js';
 import logger from './utils/logger.js';
-import { connectMongo, disconnectMongo } from './db/mongo.js';
+import { connectMongo, disconnectMongo, ensureIndexes } from './db/mongo.js';
 import { createRedisBus } from './db/redis.js';
 import { createServices } from './services/index.js';
 import { createApp } from './app.js';
@@ -21,15 +21,17 @@ async function main() {
 
   await connectMongo();
 
+  // The geospatial engine is useless without the 2dsphere index, so create it
+  // on every boot (idempotent) rather than relying on a manual migration.
+  await ensureIndexes();
+  log.info('MongoDB indexes ready (UserPresence.location: 2dsphere)');
+
   const redisBus = await createRedisBus();
 
   // Room defaults are materialised on first use; do it once so the very first
   // client does not pay for the write.
   const services = createServices({ logger: log });
   await services.getRoom('lobby', { persist: true }).catch((err) => log.warn('default room not persisted:', err.message));
-
-  const hasIndex = await services.geospatial.hasGeoIndex();
-  if (!hasIndex) log.warn('no 2dsphere index on UserPresence.location yet — run `npm run seed` to create it.');
 
   const httpServer = http.createServer();
   const app = createApp({ services, redisBus, config, logger: log });
@@ -58,9 +60,9 @@ async function main() {
 
   const stopRuntime = startRuntime({ services, io, redisBus, config, logger: log });
 
-  await new Promise((resolve) => httpServer.listen(config.server.port, '0.0.0.0', resolve));
-  log.info(`HTTP + WebSocket listening on http://localhost:${config.server.port} (scale mode: ${redisBus.mode})`);
-  log.info(`Spatial audit:  curl "http://localhost:${config.server.port}/api/spatial-audit?roomId=lobby"`);
+  await new Promise((resolve) => httpServer.listen(config.server.port, config.server.host, resolve));
+  log.info(`HTTP + WebSocket listening on ${config.server.host}:${config.server.port} (scale mode: ${redisBus.mode})`);
+  log.info(`Health:  GET /health    ·    Spatial audit:  GET /api/spatial-audit?roomId=lobby`);
 
   // Announce ourselves so every instance knows the cluster membership.
   redisBus?.publish(makeEvent('instance:up', { port: config.server.port }));

@@ -47,9 +47,17 @@ export const config = Object.freeze({
   logLevel: str('LOG_LEVEL', 'info'),
 
   server: Object.freeze({
+    // Render (and every PaaS) injects PORT; 4000 stays the local default.
     port: num('PORT', 4000, { min: 1, max: 65535 }),
-    // `*` reflects the request origin (handy for previews / tunnels).
-    clientOrigins: list('CLIENT_URL', 'http://localhost:5173'),
+    host: str('HOST', '0.0.0.0'),
+    /**
+     * Allowed browser origins. Empty = "single-origin deployment": the client
+     * bundle is served by this same Express app, so any origin that reaches us
+     * is the app itself. Set CLIENT_URL to lock it down.
+     */
+    clientOrigins: list('CLIENT_URL', ''),
+    // Directory holding the built client (client/dist). Auto-detected.
+    clientDist: str('CLIENT_DIST', ''),
     instanceId: str('INSTANCE_ID', '') || `node-${process.pid}-${Math.random().toString(36).slice(2, 8)}`,
   }),
 
@@ -59,8 +67,9 @@ export const config = Object.freeze({
   }),
 
   redis: Object.freeze({
-    // Empty URL = single-instance mode (no Pub/Sub, no adapter).
-    url: str('REDIS_URL', 'redis://127.0.0.1:6379'),
+    // Empty/unset = single-instance mode (no Pub/Sub, no adapter). Set it to
+    // `redis://…` locally or `rediss://…` for Render's TLS-enabled Redis.
+    url: str('REDIS_URL', ''),
     keyPrefix: str('REDIS_PREFIX', 'proxispeak:'),
   }),
 

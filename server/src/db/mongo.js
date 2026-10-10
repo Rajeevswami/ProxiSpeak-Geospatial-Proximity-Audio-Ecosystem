@@ -2,6 +2,9 @@
 import mongoose from 'mongoose';
 import config from '../config/index.js';
 import logger from '../utils/logger.js';
+import UserPresence from '../models/UserPresence.js';
+import Room from '../models/Room.js';
+import SpatialAudit from '../models/SpatialAudit.js';
 
 mongoose.set('strictQuery', true);
 
@@ -33,6 +36,21 @@ export async function connectMongo({ uri = config.mongo.uri } = {}) {
 
 export async function disconnectMongo() {
   if (mongoose.connection.readyState !== 0) await mongoose.disconnect();
+}
+
+/**
+ * Create every index the app depends on — most importantly the 2dsphere index
+ * on UserPresence.location that backs $near / $geoWithin. Idempotent, and run
+ * on every boot so a fresh (remote) database is usable immediately without a
+ * manual migration step.
+ */
+export async function ensureIndexes() {
+  const [presence, room, audit] = await Promise.all([
+    UserPresence.createIndexes(),
+    Room.createIndexes(),
+    SpatialAudit.createIndexes(),
+  ]);
+  return { presence, room, audit };
 }
 
 export { mongoose };

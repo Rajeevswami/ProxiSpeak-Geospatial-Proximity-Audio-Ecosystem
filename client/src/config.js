@@ -4,8 +4,20 @@
  */
 const env = import.meta.env;
 
+/**
+ * Where the Socket.io server lives.
+ *
+ * - `vite dev` (PORT mode): the API runs on :4000, so default to it.
+ * - production build: the same Express process serves this bundle AND the
+ *   websocket on one port, so connect to the page's own origin. That is what
+ *   makes a single-Web-Service deploy (Render) work with no extra config and no
+ *   Vite proxy.
+ */
+const sameOrigin = typeof window !== 'undefined' ? window.location.origin : 'http://localhost:4000';
+const defaultServerUrl = env.PROD ? sameOrigin : 'http://localhost:4000';
+
 export const config = Object.freeze({
-  serverUrl: env.VITE_SERVER_URL || 'http://localhost:4000',
+  serverUrl: env.VITE_SERVER_URL || defaultServerUrl,
   defaultRoom: env.VITE_DEFAULT_ROOM || 'lobby',
 
   /** Local movement (pixels/second) — delta-time based, never per-frame. */

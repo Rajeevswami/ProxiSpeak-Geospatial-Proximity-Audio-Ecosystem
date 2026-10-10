@@ -16,6 +16,7 @@ import { ValidationError } from '../utils/errors.js';
 import { requireString } from '../utils/validate.js';
 import { resolveCollision } from '../services/obstacleService.js';
 import { makeEvent } from '../db/redis.js';
+import { corsOrigin } from '../utils/origin.js';
 import { validateRoomJoin, validatePosition, validateSignal, validateMediaState } from './validation.js';
 
 const AVATAR_RADIUS = 14; // pixels; collision half-extent
@@ -46,16 +47,6 @@ export function createSocketServer({ httpServer, services, redisBus, config: cfg
   io.on('connection', (socket) => onConnection({ socket, io, services, redisBus, cfg, log }));
 
   return io;
-}
-
-function corsOrigin(cfg) {
-  const allowed = cfg.server.clientOrigins ?? [];
-  if (allowed.includes('*')) return true;
-  if (allowed.length === 0) return true;
-  return (origin, callback) => {
-    if (!origin || allowed.includes(origin)) return callback(null, true);
-    return callback(new Error(`origin ${origin} is not allowed by CLIENT_URL`));
-  };
 }
 
 function onConnection({ socket, io, services, redisBus, cfg, log }) {

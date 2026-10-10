@@ -15,6 +15,8 @@ opens and crossfades in; walk away and it closes. Walls between you muffle the v
 
 ```
 ProxiSpeak-Geospatial-Proximity-Audio-Ecosystem/
+├── package.json                  # root scripts: build / start / seed / test
+├── render.yaml                   # Render blueprint (single Web Service)
 ├── .env.example                  # every tunable, documented
 ├── docker-compose.yml            # optional MongoDB + Redis
 ├── README.md
@@ -46,6 +48,7 @@ ProxiSpeak-Geospatial-Proximity-Audio-Ecosystem/
 │   │   │   └── validation.js     # payload validation for every event
 │   │   └── utils/
 │   │       ├── geo.js            # pixel <-> GeoJSON tangent-plane transform
+│   │       ├── origin.js         # shared CORS/origin policy (Express + Socket.io)
 │   │       ├── validate.js       # shared validators
 │   │       ├── errors.js         # typed errors (Validation/NotFound/RateLimit)
 │   │       ├── rateLimiter.js    # token bucket
@@ -54,7 +57,7 @@ ProxiSpeak-Geospatial-Proximity-Audio-Ecosystem/
 │   │   ├── seed.js               # rooms + 2dsphere index + synthetic avatars
 │   │   ├── spatial-audit.js      # audit CLI / HTTP client
 │   │   └── loadtest.js           # 50+ concurrent clients
-│   └── test/                     # node:test — 43 tests incl. socket integration
+│   └── test/                     # node:test — 49 tests (socket + HTTP/production)
 │
 └── client/
     ├── package.json
@@ -186,15 +189,25 @@ cp client/.env.example client/.env
 `.env` essentials: `PORT=4000`, `MONGO_URI`, `REDIS_URL`, `CLIENT_URL=http://localhost:5173`,
 `STUN_URL=stun:stun.l.google.com:19302`, `EARSHT_RADIUS_PX=100`, `SPATIAL_AUDIT_BUDGET_MS=20`.
 
-### 2. Install, seed, run
+### 2. Install, seed, run (two processes, hot reload)
 
 ```bash
-cd server && npm install
-npm run seed                    # rooms + 2dsphere index (+ `npm run seed -- --users=50` for the audit)
-npm start                       # http://localhost:4000
+# repo root — installs BOTH packages and builds the client bundle
+npm install
+npm run build
 
-cd ../client && npm install
-npm run dev                     # http://localhost:5173
+npm run seed                    # rooms + 2dsphere index (`npm run seed -- --users=50` for the audit)
+
+npm run dev:server              # http://localhost:4000
+npm run dev:client              # http://localhost:5173 (Vite, HMR)
+```
+
+### 2b. Run it exactly like production (one process, one port)
+
+```bash
+npm run build                   # client -> client/dist
+NODE_ENV=production npm start   # Express serves the bundle + API + websocket on :4000
+# open http://localhost:4000 — this is the same topology Render uses
 ```
 
 Open **two browser windows** (or one normal + one private window), join the same room, allow the
@@ -207,10 +220,10 @@ microphone, and walk towards each other.
 ### 3. Prove it scales: two server instances with Redis
 
 ```bash
-# terminal 1
-cd server && PORT=4000 INSTANCE_ID=node-a npm start
+# terminal 1 (from the repo root)
+PORT=4000 INSTANCE_ID=node-a npm start
 # terminal 2
-cd server && PORT=4001 INSTANCE_ID=node-b npm start
+PORT=4001 INSTANCE_ID=node-b npm start
 ```
 
 Point two client windows at each instance (`client/.env`: `VITE_SERVER_URL=http://localhost:4000`,
@@ -229,7 +242,6 @@ graceful-degradation path, not the recommended one.
 ### 4. 50+ concurrent users
 
 ```bash
-cd server
 npm run loadtest -- --clients=50 --duration=20
 ```
 
@@ -239,14 +251,133 @@ taken **under load**.
 
 ---
 
-## 4. Test checklist
+---
+
+## 4. Deploy to Render (single Web Service)
+
+One Node process serves **everything on one port**: the built React bundle, the REST API, the
+Socket.io signaling endpoint and the health check.
+
+```
+https://proxispeak.onrender.com/
+        │
+        ├── /                       -> client/dist/index.html (SPA fallback)
+        ├── /assets/*               -> hashed bundle, max-age=1h
+        ├── /health                 -> liveness (Render health check)
+        ├── /api/*                  -> REST API + spatial audit
+        └── /socket.io/*            -> WebSocket signaling
+```
+
+### a. Push the code
+
+```bash
+git push origin main      # or your deployment branch
+```
+
+### b. Create the service
+
+**Option A — Blueprint (fastest).** Render reads `render.yaml` from the repo root:
+
+1. Dashboard → **New → Blueprint**.
+2. Pick the repository → Render applies `render.yaml`.
+3. Fill in the three `sync: false` variables when prompted.
+
+**Option B — Manual.**
+
+1. **New → Web Service** → connect the repo.
+2. **Root Directory**: leave empty (the repo root is required: the server imports `client/dist`).
+3. **Runtime**: Node (version from `engines` in the root `package.json`).
+4. **Build Command**: `npm run build`
+5. **Start Command**: `npm start`
+6. **Health Check Path**: `/health`
+
+### c. Add the databases
+
+*Render → New → MongoDB* injects `MONGO_URI` into the service automatically.
+Render → New → Redis* injects a **`rediss://`** URL into `REDIS_URL` (TLS is detected automatically).
+You can also paste an external Atlas/Redis URI.
+
+### d. Environment variables
+
+| Variable      | Required | Value in production                                                        |
+| ------------- | -------- | -------------------------------------------------------------------------- |
+| `NODE_ENV`    | set      | `production`                                                               |
+| `MONGO_URI`   | **yes**  | `mongodb+srv://…` (Atlas) or the Render-provided value                     |
+| `REDIS_URL`   | no       | `rediss://…` — enables the Socket.io Redis adapter + Pub/Sub scaling       |
+| `CLIENT_URL`  | no       | `https://proxispeak.onrender.com` — locks the browser origin down          |
+
+`PORT` is injected by Render and read automatically (`HOST` defaults to `0.0.0.0`).
+
+### e. Seed the database (once)
+
+Render's shell (`render shell proxispeak`, or any shell with the env vars):
+
+```bash
+npm run seed                          # creates the 2dsphere index + default rooms
+npm run seed -- --users=50            # + 50 synthetic avatars for the audit
+MONGO_URI="mongodb+srv://…" npm run seed   # or against any remote database
+```
+
+The server also calls `createIndexes()` on every boot, so the `2dsphere` index exists even if you
+never run the seed — seeding only adds the room layouts and demo avatars.
+
+### f. Verify the deployment
+
+```bash
+curl https://proxispeak.onrender.com/health
+# {"status":"ok","service":"proxispeak","instanceId":"node-…","scaleMode":"redis",…}
+
+curl "https://proxispeak.onrender.com/api/spatial-audit?roomId=lobby&samples=25"
+# {"ok":true,…,"queries":{"near":{"p95Ms":0.9,…}},…}
+
+curl "https://proxispeak.onrender.com/some/deep/link"
+# <!doctype html>…  (SPA fallback)
+```
+
+Then open the URL in two windows, allow the microphone in both, and walk together.
+
+### g. What the logs should look like
+
+```
+ProxiSpeak server starting (production) as instance "node-…"
+connected
+MongoDB indexes ready (UserPresence.location: 2dsphere)
+connected to rediss://default:***@… (adapter + pub/sub enabled, TLS)
+serving client bundle from …/client/dist
+HTTP + WebSocket listening on 0.0.0.0:10000 (scale mode: redis)
+Health:  GET /health    ·    Spatial audit:  GET /api/spatial-audit?roomId=lobby
+```
+
+If Redis is missing or unreachable the process still boots and says so once, then runs normally:
+
+```
+Redis unavailable (connect ECONNREFUSED …) -> running in SINGLE-INSTANCE mode.
+  The app is fully functional on one node; cross-instance broadcast is off.
+  To enable scaling set REDIS_URL (rediss://… on Render) and redeploy.
+```
+
+There is no crash loop: the health check never touches MongoDB or Redis, so a backing-service
+blip cannot make Render restart a healthy process.
+
+### h. Production notes
+
+* **Free plan** sleeps after 15 minutes idle; the first request then takes ~1 minute to wake up.
+  Use a paid plan (or `plan: starter` in `render.yaml`) for a demo that must stay warm.
+* **WebRTC and WebSockets** both work through Render's proxy, but a free instance can migrate
+  between hosts: an in-flight call drops and the clients auto-rejoin (the reconnect path is part
+  of the app). Peer connections are re-established from scratch by design.
+* **Upgrade to 2+ instances** later: attach Redis, set `REDIS_URL`, and the `@socket.io/redis-adapter`
+  fans every broadcast across instances with no code change.
+
+---
+
+## 5. Test checklist
 
 ### Mid-project review
 
 **A. Spatial Audit — queries are correct, index-backed and under 20 ms**
 
 ```bash
-cd server
 npm run seed -- --users=50 --room=lobby     # 50 avatars so the index has something to chew on
 npm run audit -- --room=lobby --x=960 --y=540 --radius=100 --samples=50
 # or, against a running server:
@@ -294,4 +425,4 @@ The same report is stored in the `spatialaudits` collection, and the browser HUD
 | Audio manipulation | turn to face a speaker / move away | stereo position follows facing, gain follows distance, no clicks or zipper noise |
 | 60 FPS | look at the FPS readout while 50 avatars move | ~60 FPS, static layer never repainted |
 | Edge cases | deny the mic, kill the tab, throttle the network, join a full room | clear messages, peers closed and removed from MongoDB, no leaked edges |
-| Automated | `cd server && npm test` · `cd client && npm test` | 43 + 13 tests, including a full socket integration suite |
+| Automated | `npm test` (runs both packages) | 49 server + 13 client tests, incl. socket and production-HTTP integration suites |

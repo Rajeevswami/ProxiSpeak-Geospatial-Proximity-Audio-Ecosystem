@@ -105,10 +105,16 @@ export async function getRoom(roomId, { persist = false } = {}) {
 }
 
 export async function listRooms() {
-  const docs = await Room.find({}, { roomId: 1, name: 1, description: 1, width: 1, height: 1 })
-    .sort({ roomId: 1 })
-    .limit(100)
-    .lean();
+  let docs = [];
+  try {
+    docs = await Room.find({}, { roomId: 1, name: 1, description: 1, width: 1, height: 1 })
+      .sort({ roomId: 1 })
+      .limit(100)
+      .lean();
+  } catch (err) {
+    // A cold/unreachable database should not take the room catalogue down.
+    if (!/not connected|ECONNREFUSED|buffering timed out|MongoServerSelectionError/i.test(err.message)) throw err;
+  }
   if (docs.length === 0) return [buildDefaultRoom('lobby')];
   return docs.map(toRoomWire);
 }
