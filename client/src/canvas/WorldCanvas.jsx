@@ -75,6 +75,8 @@ export function WorldCanvas() {
       if (!context) return;
 
       const world = worldRef.current;
+      // Nothing to simulate or paint before the first successful join.
+      if (!world.self.id) return;
       const world_ = { width: room.width, height: room.height };
       const { speed, clickSpeed, acceleration, friction, avatarRadius } = config.movement;
 
