@@ -100,9 +100,10 @@ function drawPeer(context, peer, world, scale, showLabels) {
   avatarPath(context, peer, radius);
   context.fillStyle = peer.color ?? '#8899aa';
   context.fill();
-  context.strokeStyle = 'rgba(255,255,255,0.25)';
+  context.strokeStyle = 'rgba(255,255,255,0.58)';
   context.lineWidth = 2 / scale;
   context.stroke();
+  drawHumanGlyph(context, peer.x, peer.y, radius);
 
   // Facing indicator
   context.beginPath();
@@ -136,8 +137,29 @@ function drawSelf(context, self, world, scale, showLabels) {
   context.strokeStyle = '#fff';
   context.lineWidth = 2.5 / scale;
   context.stroke();
+  drawHumanGlyph(context, self.x, self.y, radius);
 
   if (showLabels) drawLabel(context, `${self.name ?? 'You'} (you)`, self.x, self.y - radius - 12, 'self');
+}
+
+function drawHumanGlyph(context, x, y, radius) {
+  // A simple top-down person mark makes avatars read as people, not map pins.
+  context.save();
+  context.fillStyle = 'rgba(255, 255, 255, 0.94)';
+  context.shadowColor = 'rgba(8, 20, 16, 0.55)';
+  context.shadowBlur = 1.5;
+  context.beginPath();
+  context.arc(x, y - radius * 0.28, radius * 0.22, 0, Math.PI * 2);
+  context.fill();
+  context.beginPath();
+  context.moveTo(x - radius * 0.52, y + radius * 0.52);
+  context.quadraticCurveTo(x - radius * 0.48, y + radius * 0.02, x, y + radius * 0.08);
+  context.quadraticCurveTo(x + radius * 0.48, y + radius * 0.02, x + radius * 0.52, y + radius * 0.52);
+  context.quadraticCurveTo(x + radius * 0.24, y + radius * 0.68, x, y + radius * 0.58);
+  context.quadraticCurveTo(x - radius * 0.24, y + radius * 0.68, x - radius * 0.52, y + radius * 0.52);
+  context.closePath();
+  context.fill();
+  context.restore();
 }
 
 function avatarPath(context, peer, radius) {

@@ -42,6 +42,10 @@ export class SpatialAudioEngine {
     return Boolean(this.ctx && this.ctx.state !== 'closed');
   }
 
+  get contextState() {
+    return this.ctx?.state ?? 'not-started';
+  }
+
   /** Must be called from a user gesture (browser autoplay policy). */
   async init() {
     if (this.ctx) {
@@ -54,7 +58,7 @@ export class SpatialAudioEngine {
     if (this.ctx.state === 'suspended') await this.ctx.resume();
 
     this.master = this.ctx.createGain();
-    this.master.gain.value = this.muted ? 0 : this.masterVolume;
+    this.master.gain.value = this.masterVolume;
     this.master.connect(this.ctx.destination);
     return this.ctx;
   }
@@ -83,8 +87,26 @@ export class SpatialAudioEngine {
   }
 
   setLocalMuted(muted) {
+    // Muting the microphone must not mute incoming voices. The master output
+    // is controlled independently by setMasterVolume().
     this.muted = muted;
-    if (this.master) this.master.gain.setTargetAtTime(muted ? 0 : this.masterVolume, this.now(), 0.05);
+    for (const track of this.localStream?.getAudioTracks?.() ?? []) track.enabled = !muted;
+  }
+
+  async playTestTone() {
+    const ctx = await this.init();
+    const oscillator = ctx.createOscillator();
+    const envelope = ctx.createGain();
+    const start = ctx.currentTime;
+    oscillator.type = 'sine';
+    oscillator.frequency.setValueAtTime(660, start);
+    envelope.gain.setValueAtTime(0.0001, start);
+    envelope.gain.exponentialRampToValueAtTime(0.12, start + 0.025);
+    envelope.gain.exponentialRampToValueAtTime(0.0001, start + 0.28);
+    oscillator.connect(envelope);
+    envelope.connect(this.master);
+    oscillator.start(start);
+    oscillator.stop(start + 0.3);
   }
 
   setMasterVolume(value) {

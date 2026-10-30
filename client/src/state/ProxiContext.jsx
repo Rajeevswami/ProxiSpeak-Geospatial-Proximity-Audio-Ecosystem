@@ -31,6 +31,7 @@ const initialState = {
   masterVolume: 0.9,
   server: { instanceId: '', scaleMode: '', iceServers: config.audio ? [] : [] },
   notices: [],
+  activity: [],
   stats: { fps: 0, peers: 0, edges: 0, remote: null },
   sessionIntent: null, // survives a reconnect so we can re-join automatically
 };
@@ -38,6 +39,13 @@ const initialState = {
 function upsertNotice(notices, notice) {
   const next = [{ id: `${Date.now()}-${Math.random().toString(36).slice(2, 7)}`, at: Date.now(), ...notice }, ...notices];
   return next.slice(0, 6);
+}
+
+function prependActivity(activity, item) {
+  return [
+    { id: `${Date.now()}-${Math.random().toString(36).slice(2, 7)}`, at: Date.now(), ...item },
+    ...activity,
+  ].slice(0, 12);
 }
 
 function reducer(state, action) {
@@ -52,6 +60,7 @@ function reducer(state, action) {
         selfId: self.id,
         room,
         sessionIntent: action.intent,
+        activity: prependActivity(state.activity, { kind: 'join', message: `You joined ${room?.name ?? action.intent.roomId}` }),
         server: {
           instanceId: serverConfig?.instanceId ?? '',
           scaleMode: serverConfig?.scaleMode ?? '',
@@ -75,13 +84,19 @@ function reducer(state, action) {
     case 'mic':
       return { ...state, mic: { ...state.mic, ...action.mic } };
     case 'muted':
-      return { ...state, muted: action.muted };
+      return {
+        ...state,
+        muted: action.muted,
+        activity: prependActivity(state.activity, { kind: action.muted ? 'quiet' : 'mic', message: `You ${action.muted ? 'muted' : 'unmuted'} your microphone` }),
+      };
     case 'volume':
       return { ...state, masterVolume: action.volume };
     case 'server':
       return { ...state, server: { ...state.server, ...action.server } };
     case 'notice':
       return { ...state, notices: upsertNotice(state.notices, action.notice) };
+    case 'activity':
+      return { ...state, activity: prependActivity(state.activity, action.item) };
     case 'dismissNotice':
       return { ...state, notices: state.notices.filter((notice) => notice.id !== action.id) };
     case 'stats':
@@ -128,30 +143,46 @@ export function ProxiProvider({ children, serverUrl = config.serverUrl }) {
     audioRef.current = audio;
     audio.onSpeakingChange = (peerId, speaking) => {
       const peer = worldRef.current.peers.get(peerId);
-      if (peer) peer.speaking = speaking;
+      if (!peer || peer.speaking === speaking) return;
+      peer.speaking = speaking;
+      if (speaking) {
+        dispatch({ type: 'activity', item: { kind: 'speech', message: `${peer.name} is speaking nearby` } });
+      }
     };
 
     const peerManager = new PeerManager({
       socket: client.socket,
-      // STUN configuration arrives from the server in the join ack; nothing is
-      // hard-coded in the browser.
-      iceServers: [],
+      // The server-provided ICE list replaces this fallback on join. Keeping a
+      // STUN fallback covers a missing/older server config during local tests.
+      iceServers: [{ urls: 'stun:stun.l.google.com:19302' }],
       getLocalStream: () => localStreamRef.current,
       onTrack: (peerId, stream) => {
         audio.attachRemoteStream(peerId, stream);
         const peer = worldRef.current.peers.get(peerId);
-        if (peer) peer.connection = 'connected';
+        if (peer) {
+          peer.connection = 'connected';
+          audio.setPeerGeometry(peerId, peer);
+          audio.setPeerOcclusion(peerId, peer.soundFactor ?? 1);
+        }
         dispatch({ type: 'roster', roster: syncRoster(worldRef.current) });
       },
       onConnectionChange: (peerId, stateName) => {
-        const peer = worldRef.current.peers.get(peerId);
+        const world = worldRef.current;
+        const peer = world.peers.get(peerId);
         if (peer) peer.connection = stateName;
-        if (stateName === 'closed:hangup' || stateName === 'closed:replaced') {
+        if (stateName.startsWith('closed:')) {
           audio.detachRemoteStream(peerId);
-          worldRef.current.peers.delete(peerId);
-          worldRef.current.edges.delete(peerId);
+          world.edges.delete(peerId);
+          // A voice edge closing does not mean the person left the office.
+          // Keep their avatar/presence visible until peer:left arrives.
+          if (peer) peer.connection = stateName === 'closed:hangup' ? 'out-of-range' : 'pending';
         }
-        dispatch({ type: 'roster', roster: syncRoster(worldRef.current) });
+        if (peer && stateName === 'connected') {
+          dispatch({ type: 'activity', item: { kind: 'conversation', message: `Voice connected with ${peer.name}` } });
+        } else if (peer && stateName === 'failed') {
+          dispatch({ type: 'activity', item: { kind: 'warning', message: `Voice connection to ${peer.name} failed` } });
+        }
+        dispatch({ type: 'roster', roster: syncRoster(world) });
       },
       onError: (message) => dispatch({ type: 'notice', notice: { level: 'warn', message } }),
     });
@@ -181,6 +212,7 @@ export function ProxiProvider({ children, serverUrl = config.serverUrl }) {
         distancePx: Infinity,
       });
       dispatch({ type: 'roster', roster: syncRoster(world) });
+      dispatch({ type: 'activity', item: { kind: 'join', message: `${peer.name} joined the room` } });
       dispatch({ type: 'notice', notice: { level: 'info', message: `${peer.name} joined the office` } });
     });
 
@@ -193,6 +225,7 @@ export function ProxiProvider({ children, serverUrl = config.serverUrl }) {
       peerManager.connections.get(id) && peerManager.handleHangup({ peerId: id });
       dispatch({ type: 'roster', roster: syncRoster(world) });
       if (peer) {
+        dispatch({ type: 'activity', item: { kind: 'leave', message: `${peer.name} left the room` } });
         dispatch({
           type: 'notice',
           notice: { level: 'info', message: `${peer.name} left (${reason})` },
@@ -222,7 +255,16 @@ export function ProxiProvider({ children, serverUrl = config.serverUrl }) {
 
     client.on('peer:media-state', ({ id, micEnabled }) => {
       const peer = worldRef.current.peers.get(id);
-      if (peer) peer.micEnabled = micEnabled;
+      if (peer) {
+        const wasEnabled = peer.micEnabled !== false;
+        peer.micEnabled = micEnabled;
+        if (wasEnabled !== micEnabled) {
+          dispatch({
+            type: 'activity',
+            item: { kind: micEnabled ? 'mic' : 'quiet', message: `${peer.name} ${micEnabled ? 'enabled' : 'muted'} their microphone` },
+          });
+        }
+      }
       dispatch({ type: 'roster', roster: syncRoster(worldRef.current) });
     });
 
@@ -236,6 +278,7 @@ export function ProxiProvider({ children, serverUrl = config.serverUrl }) {
         peer.color = payload.peer.color;
         peer.avatar = payload.peer.avatar;
         peer.soundFactor = payload.soundFactor ?? 1;
+        peer.connection = 'pending';
       } else {
         world.peers.set(payload.peer.id, {
           ...payload.peer,
@@ -250,18 +293,26 @@ export function ProxiProvider({ children, serverUrl = config.serverUrl }) {
         soundFactor: payload.soundFactor ?? 1,
       });
       audio.setPeerOcclusion(payload.peer.id, payload.soundFactor ?? 1);
+      dispatch({ type: 'activity', item: { kind: 'range', message: `Voice link starting with ${payload.peer.name}` } });
       dispatch({ type: 'roster', roster: syncRoster(world) });
       void peerManager.handleNegotiate(payload);
     });
 
     client.on('peer:signal', (payload) => void peerManager.handleSignal(payload));
 
-    client.on('peer:hangup', ({ peerId }) => {
+    client.on('peer:hangup', ({ peerId, reason }) => {
       const world = worldRef.current;
+      const peer = world.peers.get(peerId);
       world.edges.delete(peerId);
-      world.peers.delete(peerId);
       audio.detachRemoteStream(peerId);
       peerManager.handleHangup({ peerId });
+      if (peer) {
+        peer.connection = reason === 'out-of-range' ? 'out-of-range' : 'pending';
+        if (reason === 'out-of-range') {
+          dispatch({ type: 'activity', item: { kind: 'range', message: `${peer.name} moved out of voice range` } });
+        }
+      }
+      // Only peer:left removes a person. A hangup merely closes their voice link.
       dispatch({ type: 'roster', roster: syncRoster(world) });
     });
 
@@ -310,6 +361,8 @@ export function ProxiProvider({ children, serverUrl = config.serverUrl }) {
       clearInterval(heartbeatRef.current);
       peersRef.current?.closeAll();
       audioRef.current?.dispose();
+      localStreamRef.current?.getTracks?.().forEach((track) => track.stop());
+      localStreamRef.current = null;
       clientRef.current?.disconnect();
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps -- mount once
@@ -421,6 +474,15 @@ export function ProxiProvider({ children, serverUrl = config.serverUrl }) {
       dispatch({ type: 'mic', mic: { state: 'denied', error: error.message } });
       throw error;
     }
+
+    // Start/resume Web Audio immediately while this is still a user gesture.
+    // Waiting for the browser's microphone permission prompt first can leave
+    // AudioContext suspended under autoplay policies, making remote voices silent.
+    const audioUnlock = audioRef.current?.init().catch((error) => {
+      console.warn('[audio] could not unlock Web Audio before microphone prompt:', error);
+      return null;
+    });
+
     try {
       const stream = await navigator.mediaDevices.getUserMedia({
         audio: {
@@ -432,7 +494,8 @@ export function ProxiProvider({ children, serverUrl = config.serverUrl }) {
         video: false,
       });
       localStreamRef.current = stream;
-      await audioRef.current.setLocalStream(stream);
+      const audioContext = await audioUnlock;
+      if (audioContext) await audioRef.current?.setLocalStream(stream);
       const track = stream.getAudioTracks()[0];
       dispatch({
         type: 'mic',
@@ -440,6 +503,8 @@ export function ProxiProvider({ children, serverUrl = config.serverUrl }) {
       });
       return stream;
     } catch (err) {
+      localStreamRef.current?.getTracks?.().forEach((track) => track.stop());
+      localStreamRef.current = null;
       const message =
         err?.name === 'NotAllowedError'
           ? 'Microphone permission was denied. Allow it in the browser address bar, then press "Try again" — or continue in listen-only mode.'
@@ -456,6 +521,7 @@ export function ProxiProvider({ children, serverUrl = config.serverUrl }) {
       const displayName = (name || '').trim() || `Guest ${Math.floor(Math.random() * 900 + 100)}`;
       const client = clientRef.current;
       const intent = { roomId, name: displayName, color, avatar };
+      peersRef.current?.reopen();
 
       // Unlock the AudioContext from inside this click gesture (browsers block
       // audio that starts without one).
@@ -487,6 +553,8 @@ export function ProxiProvider({ children, serverUrl = config.serverUrl }) {
   const leave = useCallback(() => {
     peersRef.current?.closeAll();
     audioRef.current?.dispose();
+    localStreamRef.current?.getTracks?.().forEach((track) => track.stop());
+    localStreamRef.current = null;
     worldRef.current.peers.clear();
     worldRef.current.edges.clear();
     dispatch({ type: 'reset' });
