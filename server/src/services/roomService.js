@@ -115,8 +115,20 @@ export async function listRooms() {
     // A cold/unreachable database should not take the room catalogue down.
     if (!/not connected|ECONNREFUSED|buffering timed out|MongoServerSelectionError/i.test(err.message)) throw err;
   }
-  if (docs.length === 0) return [buildDefaultRoom('lobby')];
-  return docs.map(toRoomWire);
+  if (docs.length === 0) {
+    const { roomId, name, description, width, height } = buildDefaultRoom('lobby');
+    return [{ roomId, name, description, width, height }];
+  }
+  // The query intentionally excludes obstacles and spawn points for a light
+  // room catalogue response. Do not pass these projected summaries through
+  // toRoomWire(), which expects the full room document.
+  return docs.map(({ roomId, name, description, width, height }) => ({
+    roomId,
+    name,
+    description: description ?? '',
+    width,
+    height,
+  }));
 }
 
 export async function requireRoom(roomId) {

@@ -9,6 +9,7 @@ import {
   smoothstep,
 } from '../src/audio/spatialMath.js';
 import { soundFactorBetween } from '../src/audio/occlusion.js';
+import { SpatialAudioEngine } from '../src/audio/SpatialAudioEngine.js';
 import { desiredDirection, resolveCollision, approach } from '../src/canvas/physics.js';
 
 const EARSHOT = 100;
@@ -77,6 +78,18 @@ test('smoothstep and distanceRatio clamp their input', () => {
   assert.equal(smoothstep(2), 1);
   assert.equal(distanceRatio(500, EARSHOT), 1);
   assert.equal(distanceRatio(-5, EARSHOT), 0);
+});
+
+test('muting the local microphone does not silence the remote master output', () => {
+  const engine = new SpatialAudioEngine();
+  const track = { enabled: true };
+  engine.localStream = { getAudioTracks: () => [track] };
+  engine.master = { gain: { setTargetAtTime() { throw new Error('mic mute must not change master output'); } } };
+
+  engine.setLocalMuted(true);
+  assert.equal(track.enabled, false);
+  engine.setLocalMuted(false);
+  assert.equal(track.enabled, true);
 });
 
 test('furniture between two avatars attenuates them', () => {

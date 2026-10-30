@@ -33,6 +33,7 @@ export class PeerManager {
     this.onError = onError;
 
     this.connections = new Map(); // peerId -> connection
+    this.earlyCandidates = new Map(); // peerId -> candidates received before negotiate/offer
     this.closed = false;
     this.statsTimer = null;
   }
@@ -66,8 +67,13 @@ export class PeerManager {
     this.connections.set(peer.id, connection);
 
     const stream = this.getLocalStream();
-    if (stream) {
-      for (const track of stream.getAudioTracks()) pc.addTrack(track, stream);
+    const audioTracks = stream?.getAudioTracks?.() ?? [];
+    if (audioTracks.length) {
+      for (const track of audioTracks) pc.addTrack(track, stream);
+    } else {
+      // A listen-only participant still needs an audio m-line in its offer so
+      // it can receive the other participant's microphone stream.
+      pc.addTransceiver('audio', { direction: 'recvonly' });
     }
 
     pc.onicecandidate = (event) => {
@@ -125,6 +131,28 @@ export class PeerManager {
     }
   }
 
+  #rememberEarlyCandidate(peerId, generation, candidate) {
+    if (!candidate) return;
+    const queued = this.earlyCandidates.get(peerId) ?? [];
+    queued.push({ generation, candidate });
+    if (queued.length > 64) queued.splice(0, queued.length - 64);
+    this.earlyCandidates.set(peerId, queued);
+  }
+
+  #useEarlyCandidates(connection) {
+    const queued = this.earlyCandidates.get(connection.id);
+    if (!queued?.length) return;
+    const matched = [];
+    const future = [];
+    for (const item of queued) {
+      if (item.generation == null || item.generation === connection.generation) matched.push(item.candidate);
+      else if (item.generation > connection.generation) future.push(item);
+    }
+    connection.pendingCandidates.push(...matched);
+    if (future.length) this.earlyCandidates.set(connection.id, future);
+    else this.earlyCandidates.delete(connection.id);
+  }
+
   async #flushCandidates(connection) {
     const queued = connection.pendingCandidates;
     connection.pendingCandidates = [];
@@ -148,6 +176,7 @@ export class PeerManager {
 
     const connection = this.#createConnection(peer, generation);
     connection.soundFactor = soundFactor;
+    this.#useEarlyCandidates(connection);
     if (initiator) await this.#makeOffer(connection);
   }
 
@@ -156,15 +185,37 @@ export class PeerManager {
     if (this.closed || !from) return;
     let connection = this.connections.get(from);
 
+    // The first trickled ICE candidate can beat both the server's negotiate
+    // event and the SDP offer over independent browser event queues. Keep a
+    // small bounded queue instead of silently losing that candidate.
+    if (!connection && data.type === 'candidate') {
+      this.#rememberEarlyCandidate(from, generation, data.candidate);
+      return;
+    }
+
     // Defensive: an offer always creates the connection even if the negotiate
     // event was lost (for example across a reconnect).
     if (!connection && data.type === 'offer') {
       connection = this.#createConnection({ id: from, name: 'peer', color: '#8899aa' }, generation ?? 0);
+      this.#useEarlyCandidates(connection);
       await this.#makeOfferAnswer(connection, data);
       return;
     }
     if (!connection) return;
     if (typeof generation === 'number' && generation < connection.generation) return;
+    if (typeof generation === 'number' && generation > connection.generation) {
+      if (data.type === 'candidate') {
+        this.#rememberEarlyCandidate(from, generation, data.candidate);
+        return;
+      }
+      if (data.type === 'offer') {
+        this.#closeConnection(connection, 'new-generation');
+        connection = this.#createConnection({ id: from, name: 'peer', color: '#8899aa' }, generation);
+        this.#useEarlyCandidates(connection);
+        await this.#makeOfferAnswer(connection, data);
+        return;
+      }
+    }
 
     try {
       if (data.type === 'offer') {
@@ -206,6 +257,7 @@ export class PeerManager {
 
   /** `peer:hangup` — the edge died (radius exit, disconnect, duplicate). */
   handleHangup({ peerId }) {
+    this.earlyCandidates.delete(peerId);
     const connection = this.connections.get(peerId);
     if (!connection) return;
     this.#closeConnection(connection, 'hangup');
@@ -284,8 +336,13 @@ export class PeerManager {
     }));
   }
 
+  reopen() {
+    this.closed = false;
+  }
+
   closeAll() {
     this.closed = true;
+    this.earlyCandidates.clear();
     for (const connection of [...this.connections.values()]) this.#closeConnection(connection, 'shutdown');
   }
 }

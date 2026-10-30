@@ -57,7 +57,7 @@ ProxiSpeak-Geospatial-Proximity-Audio-Ecosystem/
 │   │   ├── seed.js               # rooms + 2dsphere index + synthetic avatars
 │   │   ├── spatial-audit.js      # audit CLI / HTTP client
 │   │   └── loadtest.js           # 50+ concurrent clients
-│   └── test/                     # node:test — 49 tests (socket + HTTP/production)
+│   └── test/                     # node:test — 50 tests (socket + HTTP/production)
 │
 └── client/
     ├── package.json
@@ -92,8 +92,10 @@ ProxiSpeak-Geospatial-Proximity-Audio-Ecosystem/
     │       ├── PeerList.jsx          # live distance / gain / pan / occlusion
     │       ├── AuditPanel.jsx        # spatial audit + mesh stats
     │       ├── SoundLegend.jsx
+    │       ├── RoomActivity.jsx    # live participants + room activity feed
     │       └── Notices.jsx
-    └── test/spatialAudio.test.js      # 13 tests for the audio maths
+    ├── test/peerManager.test.js      # WebRTC signaling-order + listen-only tests
+    └── test/spatialAudio.test.js     # 14 audio, spatial-math and movement tests
 ```
 
 ---
@@ -425,4 +427,4 @@ The same report is stored in the `spatialaudits` collection, and the browser HUD
 | Audio manipulation | turn to face a speaker / move away | stereo position follows facing, gain follows distance, no clicks or zipper noise |
 | 60 FPS | look at the FPS readout while 50 avatars move | ~60 FPS, static layer never repainted |
 | Edge cases | deny the mic, kill the tab, throttle the network, join a full room | clear messages, peers closed and removed from MongoDB, no leaked edges |
-| Automated | `npm test` (runs both packages) | 49 server + 13 client tests, incl. socket and production-HTTP integration suites |
+| Automated | `npm test` (runs both packages) | 50 server + 16 client tests, incl. socket/production-HTTP integration and WebRTC client coverage |
